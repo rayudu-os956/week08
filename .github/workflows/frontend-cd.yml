@@ -22,16 +22,15 @@ on:
         default: "<resource_group_name>"
 
 env:
-  # pull repo secrets into env so we can assert they exist
-  ACR_NAME: ${{ secrets.ACR_NAME }} # e.g. rayuduweek7
-  ACR_LOGIN_SERVER: ${{ secrets.ACR_LOGIN_SERVER }} # e.g. rayuduweek7.azurecr.io
+  # Secrets pulled into env for convenience; configure in:
+  # GitHub Repo → Settings → Secrets and variables → Actions
+  ACR_NAME: ${{ secrets.ACR_NAME }}                 # e.g. rayudueek7
+  ACR_LOGIN_SERVER: ${{ secrets.ACR_LOGIN_SERVER }} # e.g. rayudueek7.azurecr.io
   IMAGE_TAG: ${{ github.sha }}-${{ github.run_id }}
 
 jobs:
   deploy_frontend:
     runs-on: ubuntu-latest
-    # remove environment unless you actually use environment-scoped secrets/approvals
-    # environment: Production
 
     steps:
       - name: Checkout repository
@@ -56,7 +55,7 @@ jobs:
           sed -i "s|_PRODUCT_API_URL_|${{ inputs.product_api_ip }}|g" frontend/main.js
           sed -i "s|_ORDER_API_URL_|${{ inputs.order_api_ip }}|g" frontend/main.js
           echo "--- Modified main.js ---"
-          sed -n '1,80p' frontend/main.js
+          sed -n '1,120p' frontend/main.js
           echo "------------------------"
 
       - name: Build and Push Frontend Image
@@ -70,17 +69,12 @@ jobs:
           resource-group: ${{ inputs.aks_resource_group }}
           cluster-name: ${{ inputs.aks_cluster_name }}
 
-      # Deploy: either your manifest already references :latest with imagePullPolicy: Always
-      # or we override to our newly-pushed tag explicitly.
       - name: Deploy Frontend to AKS
         run: |
           echo "Deploying image $ACR_LOGIN_SERVER/frontend:$IMAGE_TAG to AKS"
-          # Option A: apply manifest and then set image (works even if manifest uses a placeholder)
           kubectl apply -f k8s/frontend.yaml
           kubectl set image deployment/frontend-deployment \
             frontend-container="$ACR_LOGIN_SERVER/frontend:$IMAGE_TAG" --record
-
-          # Wait for rollout
           kubectl rollout status deployment/frontend-deployment --timeout=120s
           echo "Frontend rollout finished."
 
