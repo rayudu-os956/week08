@@ -22,8 +22,7 @@ on:
         default: "<resource_group_name>"
 
 env:
-  # Secrets pulled into env for convenience; configure in:
-  # GitHub Repo → Settings → Secrets and variables → Actions
+  # pulled from repo secrets; names are case‑sensitive
   ACR_NAME: ${{ secrets.ACR_NAME }}                 # e.g. rayudueek7
   ACR_LOGIN_SERVER: ${{ secrets.ACR_LOGIN_SERVER }} # e.g. rayudueek7.azurecr.io
   IMAGE_TAG: ${{ github.sha }}-${{ github.run_id }}
@@ -41,27 +40,51 @@ jobs:
         with:
           creds: ${{ secrets.AZURE_CREDENTIALS }}
 
-      - name: Check ACR secrets presence
+      # Trim whitespace/newlines from secrets and verify ACR in the current subscription
+      - name: Prepare & Validate ACR variables
+        id: prep
+        shell: bash
+        env:
+          ACR_NAME_RAW: ${{ secrets.ACR_NAME }}
+          ACR_LOGIN_SERVER_RAW: ${{ secrets.ACR_LOGIN_SERVER }}
         run: |
-          [ -z "$ACR_NAME" ] && echo "ACR_NAME is MISSING" && exit 1 || echo "ACR_NAME is set"
-          [ -z "$ACR_LOGIN_SERVER" ] && echo "ACR_LOGIN_SERVER is MISSING" && exit 1 || echo "ACR_LOGIN_SERVER is set"
+          set -euo pipefail
+          ACR_NAME_TRIM=$(echo -n "$ACR_NAME_RAW" | tr -d ' \t\r\n')
+          ACR_LOGIN_SERVER_TRIM=$(echo -n "$ACR_LOGIN_SERVER_RAW" | tr -d ' \t\r\n')
+
+          if [ -z "$ACR_NAME_TRIM" ] || [ -z "$ACR_LOGIN_SERVER_TRIM" ]; then
+            echo "ACR_NAME or ACR_LOGIN_SERVER is empty. Fix repo secrets."
+            exit 1
+          fi
+
+          echo "ACR_NAME=$ACR_NAME_TRIM" >> "$GITHUB_OUTPUT"
+          echo "ACR_LOGIN_SERVER=$ACR_LOGIN_SERVER_TRIM" >> "$GITHUB_OUTPUT"
+
+          echo "== Azure context =="
+          az account show -o table
+
+          echo "== Check ACR exists in this subscription =="
+          az acr show -n "$ACR_NAME_TRIM" -o table
+
+          echo "== Check ACR health =="
+          az acr check-health -n "$ACR_NAME_TRIM" --yes
 
       - name: Login to Azure Container Registry
-        run: az acr login --name "$ACR_NAME"
+        run: az acr login --name "${{ steps.prep.outputs.ACR_NAME }}"
 
-      - name: Inject Backend IPs into Frontend main.js
+      - name: Inject backend IPs into frontend/main.js
         run: |
           echo "Injecting Product/Order API URLs into frontend/main.js"
           sed -i "s|_PRODUCT_API_URL_|${{ inputs.product_api_ip }}|g" frontend/main.js
           sed -i "s|_ORDER_API_URL_|${{ inputs.order_api_ip }}|g" frontend/main.js
-          echo "--- Modified main.js ---"
+          echo "--- Modified main.js (head) ---"
           sed -n '1,120p' frontend/main.js
-          echo "------------------------"
+          echo "--------------------------------"
 
-      - name: Build and Push Frontend Image
+      - name: Build & Push Frontend image
         run: |
-          docker build -t "$ACR_LOGIN_SERVER/frontend:$IMAGE_TAG" ./frontend
-          docker push "$ACR_LOGIN_SERVER/frontend:$IMAGE_TAG"
+          docker build -t "${{ steps.prep.outputs.ACR_LOGIN_SERVER }}/frontend:${{ env.IMAGE_TAG }}" ./frontend
+          docker push "${{ steps.prep.outputs.ACR_LOGIN_SERVER }}/frontend:${{ env.IMAGE_TAG }}"
 
       - name: Set Kubernetes context (get AKS credentials)
         uses: azure/aks-set-context@v3
@@ -71,13 +94,13 @@ jobs:
 
       - name: Deploy Frontend to AKS
         run: |
-          echo "Deploying image $ACR_LOGIN_SERVER/frontend:$IMAGE_TAG to AKS"
+          echo "Deploying image ${{ steps.prep.outputs.ACR_LOGIN_SERVER }}/frontend:${{ env.IMAGE_TAG }}"
           kubectl apply -f k8s/frontend.yaml
+          # Adjust names if your deployment/container differ:
           kubectl set image deployment/frontend-deployment \
-            frontend-container="$ACR_LOGIN_SERVER/frontend:$IMAGE_TAG" --record
-          kubectl rollout status deployment/frontend-deployment --timeout=120s
-          echo "Frontend rollout finished."
+            frontend-container="${{ steps.prep.outputs.ACR_LOGIN_SERVER }}/frontend:${{ env.IMAGE_TAG }}" --record
+          kubectl rollout status deployment/frontend-deployment --timeout=180s
 
-      - name: Logout from Azure (AKS deployment)
+      - name: Logout from Azure
         if: always()
         run: az logout
